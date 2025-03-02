@@ -1,11 +1,12 @@
 import os
 import re
 from openai import OpenAI
-
+import ollama
 import config
 
 client = OpenAI(
-    api_key=config.api_key
+    api_key=config.api_key,
+    base_url=config.base_url
 )
 
 
@@ -27,26 +28,61 @@ def format_title(filename):
     return filename.title()  # Fallback (if no number is found)
 
 
+# Remove <think></think> from DeepSeek when running locally
+def remove_thinking(text):
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
 # Turn the transcript into notes!
 # Be careful modifying this prompt... If done improperly it can cause your token usage to skyrocket
 def generate_summary(text):
     prompt = (
-        "Summarize the following text for a student's notes. "
-        "Include key details but keep it structured and readable. "
-        "Use a mix of bullet points and short paragraphs where needed. "
-        "Highlight important definitions, concepts, and takeaways:\n\n"
-        f"{text}"
-    )
+        f"""
+        I will provide you with a transcript from a video that is part of a course. Your task is to summarize the transcript in a structured, article-style format with clear mini headings. The summary should be detailed enough to serve as a standalone resource for someone studying the course, but concise enough to avoid unnecessary repetition or filler. Do not create a title heading. A title is already created. Here’s how I’d like the summary to be structured:
 
-    # Make the API call
-    response = client.chat.completions.create(
-        model=config.MODEL_NAME,
-        messages=[{"role": "system", "content": "You are an assistant summarizing text for students."},
-                  {"role": "user", "content": prompt}],
-        stream=False
+        Introduction: Write a brief 2-3 sentence overview of what the video covers.
+        Main Content: Break the transcript into logical sections and summarize each section under a mini heading. Use clear, descriptive headings that reflect the key points or subtopics discussed in the video.
+        Key Takeaways: At the end, include a bullet-point list of the most important points or lessons from the video.
+        
+        For the tone, please use a professional, educational tone similar to a textbook or academic article. Avoid overly casual language.
+        Please ensure the summary is well-organized, easy to follow, and captures the information of the video without omitting information.
+        Here is the video transcript: \n\n{text}
+        """
     )
-    summary = response.choices[0].message.content
-    return summary
+    if config.mode == "openai":
+        try:
+            # Make the API call
+            response = client.chat.completions.create(
+                model=config.MODEL_NAME,
+                messages=[{"role": "system",
+                           "content": "You are an assistant transcribing video transcripts into article form for students."},
+                          {"role": "user", "content": prompt}],
+                stream=False,
+                # This should be changed based on the model you're using!!
+                # DeepSeek I used temperature at 1.5 and no top_p
+                # gpt-4o-mini I used temperature at 0.3 and top_p at 0.8
+                temperature=1.5,
+                # top_p=0.8,
+            )
+            summary = response.choices[0].message.content
+            return summary
+        except Exception as e:
+            print(f"Error generating summary with OpenAI: {e}")
+            return "Summary generation failed."
+    elif config.mode == "ollama":
+        try:
+            response = ollama.chat(
+                model=config.MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            summary = response['message']['content']
+            return remove_thinking(summary)
+        except Exception as e:
+            print(f"Error generating summary with Ollama: {e}")
+            return "Summary generation failed."
+    else:
+        print("Unknown mode selected in config.")
+        return "Summary generation failed."
 
 
 # Process the text file, convert it to .md file, move it to Obsidian folder
@@ -66,10 +102,11 @@ def process_txt_to_md(txt_file):
 
     text = clean_text(text)  # Fix broken line breaks
     summary = generate_summary(text)  # Call the API to generate the summary
+    trimmed_text = "\n".join(line.rstrip() for line in summary.splitlines())
 
     # Save the summary to Markdown
     with open(md_full_path, "w", encoding="utf-8") as f:
-        f.write(summary)
+        f.write(trimmed_text)
 
     print(f"Saved summary to {md_full_path}")
 
